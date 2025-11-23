@@ -1,0 +1,571 @@
+<!--
+Impostor Words - Single-file web app (HTML/CSS/JS)
+
+How to use:
+1) Create a Firebase project at https://console.firebase.google.com/
+2) In Project Settings -> Add web app -> copy the firebaseConfig object (apiKey, authDomain, databaseURL, etc.)
+3) Replace the FIREBASE_CONFIG_PLACEHOLDER below with your config.
+4) In Firebase console, go to Realtime Database -> Create database (test mode is fine while developing).
+5) Deploy this file to GitHub Pages or Vercel (or open locally with Live Server for testing).
+
+Features implemented:
+- Create room (admin) with auto code
+- Join room (name + code)
+- Admin can add/edit categories and words (stored in /categories in Realtime DB)
+- Admin selects a category and starts a round
+- System assigns 1 random impostor and gives each player their view (word or IMPOSTOR)
+- Discussion phase (no chat) - players coordinate externally
+- Admin starts voting -> players vote -> results shown
+- Admin can start a new round
+
+Security notes for production:
+- The app uses simple open rules for development. Configure Realtime Database rules for production.
+- Limit who can add/edit categories or restrict via Firebase Auth if needed.
+
+-->
+
+<!doctype html>
+<html lang="pt-BR">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width,initial-scale=1" />
+  <title>Impostor Words - Jogo</title>
+  <style>
+    body{font-family:Inter,system-ui,-apple-system,Segoe UI,Roboto,'Helvetica Neue',Arial;margin:0;background:#0f172a;color:#e6eef8}
+    .container{max-width:980px;margin:24px auto;padding:20px;background:#081029;border-radius:12px;box-shadow:0 8px 30px rgba(2,6,23,.6)}
+    h1{margin:0 0 8px;font-size:20px}
+    .row{display:flex;gap:12px;flex-wrap:wrap}
+    input,select,button,textarea{padding:8px;border-radius:8px;border:1px solid rgba(255,255,255,.08);background:#07102a;color:inherit}
+    button{cursor:pointer}
+    .card{background:#061025;padding:12px;border-radius:10px;margin-top:12px}
+    .players{display:flex;gap:10px;flex-wrap:wrap}
+    .player{padding:6px 10px;background:#0d213c;border-radius:8px}
+    .small{font-size:13px;color:#9fb0d3}
+    .center{display:flex;align-items:center;justify-content:center}
+    .hidden{display:none}
+    label{display:block;margin-bottom:6px}
+    .big-word{font-size:24px;font-weight:700}
+    .muted{color:#8da0c2}
+  </style>
+</head>
+<body>
+  <div class="container">
+    <h1>Impostor Words — Jogo de palavras</h1>
+    <div id="setup" class="card">
+      <div class="row">
+        <div style="flex:1">
+          <label>Seu nome</label>
+          <input id="nameInput" placeholder="Seu nome..." />
+        </div>
+        <div style="width:170px">
+          <label>Código da sala</label>
+          <input id="roomInput" placeholder="Ex: AB12" />
+        </div>
+        <div style="width:140px">
+          <label>&nbsp;</label>
+          <button id="joinBtn">Entrar</button>
+        </div>
+        <div style="width:180px">
+          <label>&nbsp;</label>
+          <button id="createBtn">Criar sala (ser admin)</button>
+        </div>
+      </div>
+      <p class="small muted">Dica: o Admin pode adicionar categorias e palavras e iniciar as rodadas.</p>
+    </div>
+
+    <div id="lobby" class="card hidden">
+      <div class="row" style="align-items:center;justify-content:space-between">
+        <div>
+          <div class="small">Sala: <strong id="roomCode"></strong></div>
+          <div class="small">Você: <strong id="playerName"></strong> <span id="youIsAdmin" class="small muted"></span></div>
+        </div>
+        <div class="center">
+          <div class="small">Status da sala: <strong id="roomStatus">lobby</strong></div>
+        </div>
+      </div>
+
+      <div style="margin-top:12px">
+        <div class="small">Jogadores:</div>
+        <div id="playersList" class="players"></div>
+      </div>
+
+      <div id="adminPanel" class="hidden">
+        <div class="card">
+          <h3 style="margin-top:0">Painel do Admin</h3>
+
+          <label>Gerenciar categorias/palavras</label>
+          <div style="display:flex;gap:8px;align-items:center">
+            <select id="categorySelect"></select>
+            <input id="newCategoryInput" placeholder="Nova categoria" />
+            <button id="addCategoryBtn">Adicionar categoria</button>
+          </div>
+          <div style="margin-top:8px">
+            <label>Palavras da categoria selecionada</label>
+            <div style="display:flex;gap:8px;align-items:center">
+              <input id="newWordInput" placeholder="Nova palavra" />
+              <button id="addWordBtn">Adicionar palavra</button>
+            </div>
+            <div id="wordsList" style="margin-top:8px;"></div>
+          </div>
+
+          <hr />
+          <div style="display:flex;gap:8px;align-items:center">
+            <label>Escolher categoria para a rodada</label>
+            <select id="startCategorySelect"></select>
+            <button id="startRoundBtn">Iniciar rodada</button>
+          </div>
+        </div>
+      </div>
+
+      <div style="margin-top:8px;display:flex;gap:8px">
+        <button id="readyBtn">Pronto</button>
+        <button id="leaveBtn">Sair da sala</button>
+      </div>
+    </div>
+
+    <div id="gameArea" class="card hidden">
+      <div class="small">Fase: <strong id="phaseLabel"></strong></div>
+      <div style="margin-top:12px" id="roleView">
+        <div class="big-word center" id="wordText"></div>
+        <div class="center muted small" id="roleNote"></div>
+      </div>
+
+      <div id="discussionControls" class="hidden">
+        <p class="small">Discussão — coordene por voz/externo. Quando pronto, o Admin inicia a votação.</p>
+        <div style="display:flex;gap:8px">
+          <button id="adminStartVoteBtn" class="hidden">Iniciar votação (Admin)</button>
+          <button id="leaveRoundBtn">Sair da sala</button>
+        </div>
+      </div>
+
+      <div id="votingArea" class="hidden">
+        <div class="small">Vote em quem você acha que é o impostor:</div>
+        <div id="voteButtons" style="margin-top:8px"></div>
+        <div style="margin-top:8px"><button id="skipVoteBtn">Pular (não votar)</button></div>
+      </div>
+
+      <div id="resultsArea" class="hidden">
+        <div id="resultText" class="big-word center"></div>
+        <div class="center" style="margin-top:8px">
+          <button id="nextRoundBtn">Próxima rodada</button>
+        </div>
+      </div>
+    </div>
+
+    <div class="card" style="margin-top:12px">
+      <div class="small muted">Configuração Firebase</div>
+      <textarea id="firebaseConfig" style="width:100%;height:120px;" placeholder='Cole aqui seu firebaseConfig (objeto JS) e clique em "Salvar config"'></textarea>
+      <div style="margin-top:8px;display:flex;gap:8px"><button id="saveConfigBtn">Salvar config</button><button id="clearLocalBtn">Limpar dados locais</button></div>
+      <p class="small muted">Observação: o app salva a config no localStorage. Você só precisa colar uma vez.</p>
+    </div>
+
+  </div>
+
+  <script src="https://www.gstatic.com/firebasejs/9.23.0/firebase-app-compat.js"></script>
+  <script src="https://www.gstatic.com/firebasejs/9.23.0/firebase-database-compat.js"></script>
+  <script>
+    // IMPORTANT: Replace via UI. Do NOT hardcode in shared copies.
+    let firebaseConfig = null;
+
+    // Utilities
+    const $ = id => document.getElementById(id);
+
+    // UI elements
+    const setup = $('setup');
+    const lobby = $('lobby');
+    const gameArea = $('gameArea');
+    const roomCodeEl = $('roomCode');
+    const playerNameEl = $('playerName');
+    const playersList = $('playersList');
+    const adminPanel = $('adminPanel');
+    const youIsAdmin = $('youIsAdmin');
+    const phaseLabel = $('phaseLabel');
+    const wordText = $('wordText');
+    const roleNote = $('roleNote');
+    const discussionControls = $('discussionControls');
+    const adminStartVoteBtn = $('adminStartVoteBtn');
+    const votingArea = $('votingArea');
+    const voteButtons = $('voteButtons');
+    const resultsArea = $('resultsArea');
+    const resultText = $('resultText');
+    const firebaseConfigTextarea = $('firebaseConfig');
+
+    // Buttons
+    $('createBtn').onclick = createRoom;
+    $('joinBtn').onclick = joinRoom;
+    $('addCategoryBtn').onclick = addCategory;
+    $('addWordBtn').onclick = addWordToCategory;
+    $('startRoundBtn').onclick = startRound;
+    $('readyBtn').onclick = toggleReady;
+    $('leaveBtn').onclick = leaveRoom;
+    $('adminStartVoteBtn').onclick = startVoting;
+    $('skipVoteBtn').onclick = () => castVote(null);
+    $('nextRoundBtn').onclick = () => setRoomStatus('lobby');
+    $('saveConfigBtn').onclick = saveConfig;
+    $('clearLocalBtn').onclick = clearLocal;
+
+    // State
+    let db = null;
+    let roomRef = null;
+    let playerId = null;
+    let isAdmin = false;
+    let currentRoom = null;
+    let currentPlayer = null;
+    let localConfig = localStorage.getItem('iw-firebase-config');
+    if(localConfig) firebaseConfigTextarea.value = localConfig;
+
+    function saveConfig(){
+      const txt = firebaseConfigTextarea.value.trim();
+      if(!txt){alert('Cole seu firebaseConfig JSON/JS object na caixa.');return}
+      try{
+        // try to evaluate as object literal
+        // eslint-disable-next-line no-eval
+        const cfg = eval('('+txt+')');
+        firebaseConfig = cfg;
+        localStorage.setItem('iw-firebase-config', txt);
+        initFirebase();
+        alert('Config salva e Firebase inicializado.');
+      }catch(e){console.error(e);alert('Config inválida. Cole o objeto firebaseConfig exatamente como no console do Firebase.')}
+    }
+
+    function clearLocal(){
+      localStorage.removeItem('iw-player');
+      localStorage.removeItem('iw-room');
+      alert('Dados locais limpos. Recarregue a página.');
+    }
+
+    function initFirebase(){
+      if(!firebaseConfig) {
+        const txt = localStorage.getItem('iw-firebase-config');
+        if(!txt) return;
+        // eslint-disable-next-line no-eval
+        firebaseConfig = eval('('+txt+')');
+      }
+      if(!firebaseConfig) return;
+      if(!firebase.apps.length){
+        firebase.initializeApp(firebaseConfig);
+      }
+      db = firebase.database();
+      loadCategories();
+    }
+
+    // helpers
+    function makeId(len=4){
+      const chars = 'ABCDEFGHJKMNPQRSTUVWXYZ23456789';
+      let s='';for(let i=0;i<len;i++) s+=chars.charAt(Math.floor(Math.random()*chars.length));
+      return s;
+    }
+
+    function createRoom(){
+      initFirebase();
+      if(!db){alert('Cole a config do Firebase e clique em Salvar config antes.');return}
+      const name = $('nameInput').value.trim();
+      if(!name){alert('Digite seu nome.');return}
+      const code = makeId(4);
+      playerId = 'p_'+Date.now()+'_'+Math.floor(Math.random()*9999);
+      isAdmin = true;
+      const room = {
+        code: code,
+        admin: playerId,
+        status: 'lobby',
+        players: {},
+        categories: {},
+        createdAt: Date.now()
+      };
+      room.players[playerId] = {name:name, ready:false, id:playerId};
+      const rref = db.ref('rooms/'+code);
+      rref.set(room).then(()=>{
+        localStorage.setItem('iw-room', code);
+        localStorage.setItem('iw-player', playerId);
+        enterRoom(code, playerId, name);
+      }).catch(err=>{console.error(err);alert('Erro criando sala: '+err.message)})
+    }
+
+    function joinRoom(){
+      initFirebase();
+      if(!db){alert('Cole a config do Firebase e clique em Salvar config antes.');return}
+      const name = $('nameInput').value.trim();
+      const code = $('roomInput').value.trim().toUpperCase();
+      if(!name||!code){alert('Preencha nome e código.');return}
+      db.ref('rooms/'+code).get().then(snap=>{
+        if(!snap.exists()){alert('Sala não encontrada. Verifique o código.');return}
+        playerId = 'p_'+Date.now()+'_'+Math.floor(Math.random()*9999);
+        const playersPath = 'rooms/'+code+'/players/'+playerId;
+        db.ref(playersPath).set({name:name, ready:false, id:playerId}).then(()=>{
+          localStorage.setItem('iw-room', code);
+          localStorage.setItem('iw-player', playerId);
+          enterRoom(code, playerId, name);
+        })
+      })
+    }
+
+    function enterRoom(code, pid, name){
+      currentRoom = code;
+      currentPlayer = {id:pid,name:name};
+      roomRef = db.ref('rooms/'+code);
+      setup.classList.add('hidden');
+      lobby.classList.remove('hidden');
+      roomCodeEl.textContent = code;
+      playerNameEl.textContent = name;
+      youIsAdmin.textContent = isAdmin?'(Admin)':'';
+      listenRoom();
+    }
+
+    function listenRoom(){
+      roomRef.on('value',snap=>{
+        const data = snap.val();
+        if(!data) return; // room deleted
+        document.getElementById('roomStatus').textContent = data.status||'lobby';
+        renderPlayers(data.players||{});
+        renderCategoriesSelects(data.categories||{});
+        if(data.status==='word'){
+          lobby.classList.add('hidden');
+          gameArea.classList.remove('hidden');
+          phaseLabel.textContent = 'Mostrando palavra';
+          showRoleView(data);
+        } else if(data.status==='discussion'){
+          lobby.classList.add('hidden');
+          gameArea.classList.remove('hidden');
+          phaseLabel.textContent = 'Discussão';
+          showDiscussion(data);
+        } else if(data.status==='vote'){
+          lobby.classList.add('hidden');
+          gameArea.classList.remove('hidden');
+          phaseLabel.textContent = 'Votação';
+          showVoting(data);
+        } else if(data.status==='result'){
+          lobby.classList.add('hidden');
+          gameArea.classList.remove('hidden');
+          phaseLabel.textContent = 'Resultado';
+          showResult(data);
+        } else {
+          // lobby
+          gameArea.classList.add('hidden');
+          lobby.classList.remove('hidden');
+          adminPanel.classList.toggle('hidden', !(data.admin===currentPlayer.id));
+          isAdmin = data.admin===currentPlayer.id;
+          youIsAdmin.textContent = isAdmin?'(Admin)':'';
+        }
+      })
+    }
+
+    function renderPlayers(players){
+      playersList.innerHTML='';
+      for(const pid in players){
+        const el = document.createElement('div');el.className='player';el.textContent=players[pid].name + (players[pid].ready? ' ✅':'');
+        playersList.appendChild(el);
+      }
+    }
+
+    function addCategory(){
+      const name = $('newCategoryInput').value.trim();
+      if(!name) return alert('Digite nome da categoria');
+      const path = 'rooms/'+currentRoom+'/categories/'+name;
+      db.ref(path).set({name:name, words:{}}).then(()=>{$('newCategoryInput').value='';});
+    }
+
+    function loadCategories(){
+      if(!db) return;
+      db.ref('global_categories').on('value',snap=>{
+        const data = snap.val()||{};
+        // copy into UI selects if room not set
+      })
+    }
+
+    function renderCategoriesSelects(categories){
+      const sel = $('categorySelect'); const sel2 = $('startCategorySelect');
+      sel.innerHTML=''; sel2.innerHTML='';
+      for(const key in categories){
+        const opt = document.createElement('option'); opt.value=key; opt.textContent=key; sel.appendChild(opt);
+        const opt2 = document.createElement('option'); opt2.value=key; opt2.textContent=key; sel2.appendChild(opt2);
+      }
+      if(Object.keys(categories).length===0){
+        sel.innerHTML = '<option value="">(nenhuma)</option>';
+        sel2.innerHTML = '<option value="">(nenhuma)</option>';
+      }
+      renderWordsList(categories[sel.value]);
+      $('categorySelect').onchange = ()=> renderWordsList(categories[$('categorySelect').value]);
+    }
+
+    function renderWordsList(category){
+      const div = $('wordsList'); div.innerHTML='';
+      if(!category) return div.textContent='Selecione uma categoria';
+      const words = category.words||{};
+      for(const k in words){
+        const row = document.createElement('div');
+        row.textContent = words[k];
+        const del = document.createElement('button'); del.textContent='Excluir'; del.style.marginLeft='8px';
+        del.onclick = ()=> db.ref('rooms/'+currentRoom+'/categories/'+category.name+'/words/'+k).remove();
+        row.appendChild(del);
+        div.appendChild(row);
+      }
+    }
+
+    function addWordToCategory(){
+      const cat = $('categorySelect').value; const word = $('newWordInput').value.trim();
+      if(!cat) return alert('Escolha categoria');
+      if(!word) return alert('Digite a palavra');
+      const key = db.ref().push().key;
+      db.ref('rooms/'+currentRoom+'/categories/'+cat+'/words/'+key).set(word).then(()=>{$('newWordInput').value='';});
+    }
+
+    function startRound(){
+      const cat = $('startCategorySelect').value; if(!cat) return alert('Escolha categoria');
+      // read words
+      const catPath = 'rooms/'+currentRoom+'/categories/'+cat+'/words';
+      db.ref(catPath).get().then(snap=>{
+        const w = snap.val(); if(!w){alert('Categoria sem palavras');return}
+        const allWords = Object.values(w);
+        const word = allWords[Math.floor(Math.random()*allWords.length)];
+        // get players
+        db.ref('rooms/'+currentRoom+'/players').get().then(psnap=>{
+          const players = psnap.val();
+          const ids = Object.keys(players);
+          const impostorIndex = Math.floor(Math.random()*ids.length);
+          const impostorId = ids[impostorIndex];
+          // set per-player roles
+          const updates = {};
+          updates['rooms/'+currentRoom+'/status'] = 'word';
+          updates['rooms/'+currentRoom+'/round'] = {word:word, impostor:impostorId, startedAt:Date.now(), category:cat};
+          // store what each player sees
+          ids.forEach(pid=>{
+            if(pid===impostorId) updates['rooms/'+currentRoom+'/playerViews/'+pid] = {role:'impostor', text:'IMPOSTOR'};
+            else updates['rooms/'+currentRoom+'/playerViews/'+pid] = {role:'player', text:word};
+          });
+          db.ref().update(updates);
+        })
+      })
+    }
+
+    function showRoleView(data){
+      const pv = (data.playerViews||{})[currentPlayer.id];
+      if(!pv){ wordText.textContent='...'; roleNote.textContent='Aguardando...'; return }
+      if(pv.role==='impostor'){
+        wordText.textContent = 'VOCÊ É O IMPOSTOR';
+        roleNote.textContent = 'Finja que sabe a palavra.';
+      } else {
+        wordText.textContent = pv.text;
+        roleNote.textContent = 'Você conhece a palavra. Finja!';
+      }
+      discussionControls.classList.remove('hidden');
+      adminStartVoteBtn.classList.toggle('hidden', !isAdmin);
+    }
+
+    function toggleReady(){
+      const path = 'rooms/'+currentRoom+'/players/'+currentPlayer.id+'/ready';
+      db.ref(path).get().then(snap=>{
+        const cur = snap.val();
+        db.ref(path).set(!cur);
+      })
+    }
+
+    function leaveRoom(){
+      if(!confirm('Sair da sala?')) return;
+      if(roomRef) {
+        db.ref('rooms/'+currentRoom+'/players/'+currentPlayer.id).remove();
+        // if admin leaves, delete the room
+        db.ref('rooms/'+currentRoom).get().then(snap=>{
+          const r = snap.val();
+          if(r && r.admin===currentPlayer.id) db.ref('rooms/'+currentRoom).remove();
+        })
+      }
+      localStorage.removeItem('iw-player');
+      localStorage.removeItem('iw-room');
+      location.reload();
+    }
+
+    function startVoting(){
+      // move to discussion -> vote
+      db.ref('rooms/'+currentRoom+'/status').set('vote').then(()=>{
+        // initialize votes area
+        db.ref('rooms/'+currentRoom+'/votes').remove();
+      })
+    }
+
+    function showDiscussion(data){
+      wordText.textContent = '';
+      roleNote.textContent = '';
+      discussionControls.classList.remove('hidden');
+      adminStartVoteBtn.classList.toggle('hidden', !isAdmin);
+    }
+
+    function showVoting(data){
+      votingArea.classList.remove('hidden');
+      voteButtons.innerHTML='';
+      const players = data.players||{};
+      for(const pid in players){
+        const btn = document.createElement('button'); btn.textContent = players[pid].name; btn.onclick = ()=> castVote(pid);
+        voteButtons.appendChild(btn);
+      }
+      // listen votes and detect end
+      db.ref('rooms/'+currentRoom+'/votes').on('value',snap=>{
+        const votes = snap.val()||{};
+        const totalPlayers = Object.keys(players).length;
+        const cast = Object.keys(votes).length;
+        if(cast>=totalPlayers){
+          computeResults(data, votes);
+        }
+      })
+    }
+
+    function castVote(targetId){
+      db.ref('rooms/'+currentRoom+'/votes/'+currentPlayer.id).set(targetId||'skip');
+    }
+
+    function computeResults(roomData, votes){
+      // count
+      const counts = {};
+      for(const pid in votes){
+        const v = votes[pid];
+        counts[v] = (counts[v]||0)+1;
+      }
+      // find max
+      let max= -1; let chosen = null;
+      for(const k in counts){ if(counts[k]>max){max=counts[k]; chosen=k}};
+      // chosen might be 'skip'
+      const impostor = roomData.round && roomData.round.impostor;
+      const eliminatedName = (chosen && chosen!=='skip') ? (roomData.players[chosen] && roomData.players[chosen].name) : 'Ninguém';
+      let resultMsg = '';
+      if(chosen && chosen!=='skip'){
+        if(chosen===impostor) resultMsg = `Eliminado: ${eliminatedName} — ERA O IMPOSTOR! Jogadores vencem.`;
+        else resultMsg = `Eliminado: ${eliminatedName} — NÃO ERA o impostor. O impostor sobreviveu.`;
+      } else {
+        resultMsg = 'Ninguém foi eliminado.';
+      }
+      // save result
+      db.ref('rooms/'+currentRoom+'/status').set('result');
+      db.ref('rooms/'+currentRoom+'/result').set({chosen:chosen, message:resultMsg, impostor:impostor});
+    }
+
+    function showResult(data){
+      const res = data.result || {};
+      resultText.textContent = res.message || 'Resultado';
+      votingArea.classList.add('hidden');
+      resultsArea.classList.remove('hidden');
+    }
+
+    // on load, see if we have local room
+    window.addEventListener('load',()=>{
+      const savedCfg = localStorage.getItem('iw-firebase-config');
+      if(savedCfg) firebaseConfigTextarea.value = savedCfg;
+      try{ const savedRoom = localStorage.getItem('iw-room'); const savedPlayer = localStorage.getItem('iw-player');
+        if(savedRoom && savedPlayer) {
+          // try to init and rejoin
+          // eslint-disable-next-line no-eval
+          if(localStorage.getItem('iw-firebase-config')) firebaseConfig = eval('('+localStorage.getItem('iw-firebase-config')+')');
+          initFirebase();
+          currentRoom = savedRoom; playerId = savedPlayer;
+          // fetch player name
+          db.ref('rooms/'+currentRoom+'/players/'+playerId).get().then(snap=>{
+            if(snap.exists()){
+              enterRoom(currentRoom, playerId, snap.val().name);
+            } else {
+              localStorage.removeItem('iw-room'); localStorage.removeItem('iw-player');
+            }
+          }).catch(()=>{});
+        }
+      }catch(e){console.warn(e)}
+    })
+  </script>
+</body>
+</html>
